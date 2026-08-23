@@ -1,0 +1,81 @@
+# Requires: pip install opencv-python mediapipe torch numpy
+import cv2
+import numpy as np
+import mediapipe as mp
+import torch
+
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False,
+                       max_num_hands=2,
+                       min_detection_confidence=0.5,
+                       min_tracking_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
+
+# Replace with your trained PyTorch model and class labels
+class DummyModel(torch.nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.fc = torch.nn.Linear(21 * 3 * 30, num_classes)  # example shape
+
+    def forward(self, x):
+        return self.fc(x)
+
+# Load or instantiate model
+model = DummyModel(num_classes=10)
+model.eval()
+
+# Example label map
+labels = [f"sign_{i}" for i in range(10)]
+
+# Buffer to hold last N frames of landmarks
+SEQ_LEN = 30
+buffer = []
+
+def extract_hand_keypoints(results):
+    # returns a flattened list of length 21*3 for one hand; zeros if not present
+    if not results.multi_hand_landmarks:
+        return np.zeros((21, 3), dtype=np.float32).flatten()
+    # For this demo, use first detected hand
+    lm = results.multi_hand_landmarks[0]
+    pts = []
+    for p in lm.landmark:
+        pts.append([p.x, p.y, p.z])
+    return np.array(pts, dtype=np.float32).flatten()
+
+cap = cv2.VideoCapture(0)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+    keypoints = extract_hand_keypoints(results)  # 63 floats for one hand
+
+    # Simple normalization: scale by image size or center
+    # (Better: normalize relative to wrist/hand bbox)
+    buffer.append(keypoints)
+    if len(buffer) > SEQ_LEN:
+        buffer.pop(0)
+
+    if len(buffer) == SEQ_LEN:
+        seq = np.array(buffer)  # (SEQ_LEN, D)
+        seq_flat = seq.flatten()  # shape (SEQ_LEN * D,)
+        x = torch.from_numpy(seq_flat).float().unsqueeze(0)  # (1, features)
+        with torch.no_grad():                                                                                                                               
+            logits = model(x)
+            pred = logits.argmax(dim=1).item()
+            pred_label = labels[pred]
+        cv2.putText(frame, f"Pred: {pred_label}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+    # Draw landmarks
+    if results.multi_hand_landmarks:
+        for lm in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, lm, mp_hands.HAND_CONNECTIONS)
+
+    cv2.imshow("Sign Decoder", frame)
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+
+cap.release()
+cv2.destroyAllWindows()
